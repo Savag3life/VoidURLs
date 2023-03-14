@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -38,18 +37,19 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_URI")))
+
+	if err != nil {
+		log.Fatal("Failed to connect to database.")
+	}
+	defer client.Disconnect(ctx)
+
+	urlscollection := client.Database("urls").Collection("urls")
+
 	router.GET("/:value", func(c *gin.Context) {
 		value := c.Param("value")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		client, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_URI")))
-
-		if err != nil {
-			c.JSON(503, gin.H{"error": err.Error()})
-		}
-		defer client.Disconnect(ctx)
-
 		urlscollection := client.Database("urls").Collection("urls")
 		filter := bson.D{{Key: "id", Value: value}}
 
@@ -62,37 +62,40 @@ func main() {
 				"views": 1,
 			},
 		}
-
 		urlscollection.UpdateOne(ctx, updatefilter, update, options.Update().SetUpsert(false))
 		c.Redirect(http.StatusMovedPermanently, result.OriginURL)
 	})
 
 	router.POST("/void/create", func(c *gin.Context) {
 		var url RequestURL
-
 		if err := c.Bind(&url); err != nil {
 			c.JSON(503, gin.H{"error": "Internal Server Error - Database Unavailable"})
 		}
 
-		id := string(generateRandom())
-
-		fmt.Printf("Creating short URL for %s pointing to %s\n", url.InputURL, id)
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		client, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_URI")))
+		err, id := generateUniqueRandom(urlscollection, ctx)
 
 		if err != nil {
-			c.JSON(503, gin.H{"error": "Internal Server Error - Database Unavailable"})
+			c.JSON(503, gin.H{"error": err.Error()})
 		}
 
-		urlscollection := client.Database("urls").Collection("urls")
-
+		fmt.Printf("Creating short URL for %s pointing to %s\n", url.InputURL, id)
 		urlscollection.InsertOne(ctx, ShortURL{DatabaseId: primitive.NewObjectID(), ID: id, OriginURL: url.InputURL, Views: 0})
 		c.JSON(201, id)
 	})
 
 	router.Run(os.Getenv("ADDRESS") + ":" + os.Getenv("PORT"))
+}
+
+func generateUniqueRandom(urlscollection *mongo.Collection, ctx context.Context) (err error, random string) {
+
+	random = string(generateRandom())
+	filter := bson.D{{Key: "id", Value: random}}
+	for value := urlscollection.FindOne(ctx, filter); value.Err() == nil; {
+		random = string(generateRandom())
+	}
+
+	return nil, random
+
 }
 
 func generateRandom() []byte {
